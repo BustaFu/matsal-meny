@@ -6,7 +6,7 @@
 #   ./scripts/backup.sh --lokalt   # installation utan Docker
 #
 # Miljövariabler:
-#   BACKUP_KATALOG   vart backuperna hamnar (standard: /var/backups/matsal-menu)
+#   BACKUP_KATALOG   vart backuperna hamnar (standard: /var/backups/matsal-meny)
 #   BEHALL           hur många dagar som behålls (standard: 14)
 #
 # Kan köras medan systemet är i drift – menyskrivningarna är atomiska
@@ -17,7 +17,7 @@ set -euo pipefail
 LOKALT=false
 if [ "${1:-}" = "--lokalt" ]; then LOKALT=true; fi
 
-KATALOG="${BACKUP_KATALOG:-/var/backups/matsal-menu}"
+KATALOG="${BACKUP_KATALOG:-/var/backups/matsal-meny}"
 BEHALL="${BEHALL:-14}"
 PROJEKT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -29,7 +29,7 @@ mkdir -p "$KATALOG"
 if $LOKALT; then
   tar czf "$FIL" -C "$PROJEKT" data images
 else
-  docker compose -f "$PROJEKT/docker-compose.yml" exec -T matsal-menu \
+  docker compose -f "$PROJEKT/docker-compose.yml" exec -T matsal-meny \
     tar czf - -C /app data images > "$FIL"
 fi
 

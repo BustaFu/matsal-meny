@@ -7,8 +7,8 @@ Så här jobbar du med matsal-menyn i vardagen – från första igångsättning
 ### Docker (rekommenderas)
 
 ```bash
-git clone https://github.com/ditt-konto/matsal-menu.git
-cd matsal-menu
+git clone https://github.com/ditt-konto/matsal-meny.git
+cd matsal-meny
 cp .env.example .env
 ```
 
@@ -125,7 +125,7 @@ chmod +x scripts/backup.sh
 ./scripts/backup.sh --lokalt         # installation utan Docker
 ```
 
-Skriptet packar `data/ + images/` till `/var/backups/matsal-menu/matsal-ÅÅÅÅ-MM-DD-TTMM.tar.gz`,
+Skriptet packar `data/ + images/` till `/var/backups/matsal-meny/matsal-ÅÅÅÅ-MM-DD-TTMM.tar.gz`,
 verifierar att arkivet innehåller menydatan och städar bort backups äldre än 14 dagar
 (`BACKUP_KATALOG` och `BEHALL` kan styras via miljövariabler).
 
@@ -138,7 +138,7 @@ crontab -e
 Lägg till raden (varje dag 23:30, logg till /var/log):
 
 ```
-30 23 * * * cd /opt/matsal-menu && ./scripts/backup.sh >> /var/log/matsal-backup.log 2>&1
+30 23 * * * cd /opt/matsal-meny && ./scripts/backup.sh >> /var/log/matsal-backup.log 2>&1
 ```
 
 #### 2. Kopiera bort backuperna från servern (3-2-1-regeln)
@@ -148,13 +148,13 @@ Skicka därför bort kopian till en annan maskin, t.ex. med rsync via cron på e
 eller NAS:
 
 ```bash
-rsync -a --delete /var/backups/matsal-menu/ backup@nas:/backup/matsal-menu/
+rsync -a --delete /var/backups/matsal-meny/ backup@nas:/backup/matsal-meny/
 ```
 
 Alternativ till moln (S3-kompatibel bucket med rclone):
 
 ```bash
-rclone copy /var/backups/matsal-menu/ moln:matsal-backups/ --max-age 30d
+rclone copy /var/backups/matsal-meny/ moln:matsal-backups/ --max-age 30d
 ```
 
 #### 3. Testa återställningen då och då
@@ -163,19 +163,19 @@ En backup man aldrig provat att återställa är ingen backup. Snabbtest:
 
 ```bash
 # packa upp och kontrollera innehållet
-tar tzf /var/backups/matsal-menu/matsal-ÅÅÅÅ-MM-DD-*.tar.gz | head
+tar tzf /var/backups/matsal-meny/matsal-ÅÅÅÅ-MM-DD-*.tar.gz | head
 ```
 
 #### Återställa
 
 ```bash
 # 1. packa upp backupen
-mkdir /tmp/aterstall && tar xzf /var/backups/matsal-menu/matsal-ÅÅÅÅ-MM-DD-*.tar.gz -C /tmp/aterstall
+mkdir /tmp/aterstall && tar xzf /var/backups/matsal-meny/matsal-ÅÅÅÅ-MM-DD-*.tar.gz -C /tmp/aterstall
 
 # 2a. Docker: kopiera in i volymerna och starta om
-docker compose cp /tmp/aterstall/data/meals.json matsal-menu:/app/data/meals.json
-docker compose cp /tmp/aterstall/images/. matsal-menu:/app/images/
-docker compose restart matsal-menu
+docker compose cp /tmp/aterstall/data/meals.json matsal-meny:/app/data/meals.json
+docker compose cp /tmp/aterstall/images/. matsal-meny:/app/images/
+docker compose restart matsal-meny
 
 # 2b. Utan Docker: kopiera tillbaka i projektkatalogen och starta om
 cp /tmp/aterstall/data/meals.json data/meals.json
@@ -198,7 +198,7 @@ Datan ligger i volymer och påverkas inte.
 
 1. Säkerhetskopiera `meals.json` (och `images/`).
 2. Installera enligt steg 1 på den nya servern.
-3. Kopiera tillbaka filerna (i Docker: `docker compose cp meals.json matsal-menu:/app/data/`).
+3. Kopiera tillbaka filerna (i Docker: `docker compose cp meals.json matsal-meny:/app/data/`).
 
 ### Reverse proxy med HTTPS (valfritt)
 

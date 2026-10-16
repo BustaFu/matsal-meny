@@ -1,8 +1,8 @@
 services:
-  matsal-menu:
+  matsal-meny:
     build: .
-    image: matsal-menu:latest
-    container_name: matsal-menu
+    image: matsal-meny:latest
+    container_name: matsal-meny
     restart: unless-stopped
     ports:
       # ändra värdport via .env om 3000 är upptagen, t.ex. VARDPORT=3001

@@ -39,11 +39,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Bygg Docker-image
-        run: docker build -t matsal-menu:ci .
+        run: docker build -t matsal-meny:ci .
 
       - name: Starta container och testa
         run: |
-          docker run -d --name test -p 3200:3000 -e ADMIN_TOKEN=ci-token matsal-menu:ci
+          docker run -d --name test -p 3200:3000 -e ADMIN_TOKEN=ci-token matsal-meny:ci
           for i in $(seq 1 20); do
             curl -sf http://localhost:3200/meny/api/menu/today > /dev/null && exit 0
             sleep 0.5
