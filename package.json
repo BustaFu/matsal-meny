@@ -1,0 +1,13 @@
+{
+  "name": "matsal-menu",
+  "version": "1.0.0",
+  "description": "Webbbaserad lunchmeny för skolmatsal – kioskvisning av dagens måltider",
+  "license": "MIT",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

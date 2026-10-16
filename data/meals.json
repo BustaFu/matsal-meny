@@ -1,0 +1,150 @@
+{
+  "display": {
+    "subtitle": "Alla måltider serveras med bröd, salladsbuffé, vatten och mjölk. Havregrynsgröt finns alltid på begäran.",
+    "closedMessage": "Köket är stängt i dag – glöm inte din matsäck",
+    "refreshSeconds": 30
+  },
+  "dishes": [
+    {
+      "id": "havregrot",
+      "name": "Havregrynsgröt",
+      "description": "Krämig havregrynsgröt med varm hallonsås. Tillbehör: kanel, socker och mjölk.",
+      "ingredients": "Havregryn, vatten, mjölk, hallon, potatismjöl",
+      "allergens": [
+        "gluten",
+        "mjolk"
+      ],
+      "tags": [
+        "vegetarisk",
+        "barnfavorit"
+      ],
+      "price": null,
+      "image": "havregrot.jpg",
+      "origin": "Havre från kvarnen i byn"
+    },
+    {
+      "id": "fisksoppa",
+      "name": "Fisksoppa",
+      "description": "Krämig laxsoppa med dill och surdegsbröd.",
+      "ingredients": "Lax, purjolök, grädde, potatis, rågbröd",
+      "allergens": [
+        "gluten",
+        "fisk",
+        "mjolk"
+      ],
+      "tags": [
+        "närproducerat"
+      ],
+      "price": null,
+      "image": "fisksoppa.webp",
+      "origin": "Lax från Vättern"
+    },
+    {
+      "id": "pasta-bolognese",
+      "name": "Pasta bolognese",
+      "description": "Pasta med tomatsås, riven ost och stor salladsbuffé.",
+      "ingredients": "Vetepasta, nötfärs, krossade tomater, lök, morötter",
+      "allergens": [
+        "gluten",
+        "mjolk"
+      ],
+      "tags": [
+        "kan serveras mjölkfritt"
+      ],
+      "price": null,
+      "image": "",
+      "origin": ""
+    },
+    {
+      "id": "veggie-wraps",
+      "name": "Grönsakswraps",
+      "description": "Fullkornswraps med hummus, gurka och paprikastavar.",
+      "ingredients": "Fullkornswrap, kikärtor, sesam, gurka, paprika",
+      "allergens": [
+        "gluten",
+        "sesam"
+      ],
+      "tags": [
+        "vegansk"
+      ],
+      "price": null,
+      "image": "veggie-wraps.webp",
+      "origin": ""
+    },
+    {
+      "id": "risbowl",
+      "name": "Risbowl",
+      "description": "Stekt ris med rostade grönsaker och jordnötsfri sås.",
+      "ingredients": "Ris, morötter, zucchini, kikärtor, sojasås",
+      "allergens": [
+        "soja"
+      ],
+      "tags": [
+        "vegansk",
+        "glutenfri"
+      ],
+      "price": null,
+      "image": "risbowl.png",
+      "origin": ""
+    },
+    {
+      "id": "sillvisa",
+      "name": "Sillvisor med senapsås",
+      "description": "Inlagd sill, dillstekt potatis och senapsås.",
+      "ingredients": "Sill, potatis, dill, vetemjöl, senap",
+      "allergens": [
+        "gluten",
+        "fisk",
+        "senap"
+      ],
+      "tags": [
+        "svensk klassiker"
+      ],
+      "price": null,
+      "image": "",
+      "origin": ""
+    }
+  ],
+  "schedule": {
+    "weekdays": {
+      "1": [
+        "havregrot",
+        "pasta-bolognese"
+      ],
+      "2": [
+        "fisksoppa",
+        "risbowl"
+      ],
+      "3": [
+        "havregrot",
+        "sillvisa",
+        "veggie-wraps"
+      ],
+      "4": [
+        "pasta-bolognese",
+        "risbowl"
+      ],
+      "5": [
+        "havregrot",
+        "risbowl"
+      ],
+      "6": [],
+      "7": []
+    },
+    "overrides": {
+      "2026-10-23": [
+        "havregrot",
+        "fisksoppa"
+      ],
+      "2026-12-24": []
+    },
+    "weeks": {
+      "2026-W42": {
+        "5": [
+          "risbowl",
+          "veggie-wraps"
+        ]
+      }
+    }
+  }
+}

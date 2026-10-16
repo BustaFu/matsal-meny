@@ -1,0 +1,18 @@
+# hemligheter och miljö
+.env
+.env.*
+!.env.example
+
+# beroenden
+node_modules/
+
+# kördata (lever i volymer i docker; i bare-metal ligger den här)
+data/meals.json.tmp
+
+# loggar och tillfälliga filer
+*.log
+npm-debug.log*
+
+# editormappar
+.vscode/
+.idea/

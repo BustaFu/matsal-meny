@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Menyinställningar – matsal-backend</title>
+<script>
+/* Bas-URL: fungerar både på /meny/admin och /admin (redirect) */
+const BASE = location.pathname.replace(/\/(admin|display)\/?$/, '').replace(/\/$/, '');
+function baseUrl(sökväg) {
+  if (/^https?:\/\//.test(sökväg)) return sökväg;
+  return BASE + '/' + String(sökväg).replace(/^\/+/, '');
+}
+</script>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,Arial,sans-serif;background:#f4f6f8;color:#16232e;
+       padding:24px;max-width:1200px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 6px}
+  h2{font-size:18px;margin:0 0 8px}
+  table{border-collapse:collapse;width:100%;font-size:14px;background:#fff}
+  th,td{border:1px solid #c6cfd8;padding:6px 10px;text-align:left;vertical-align:middle}
+  thead th{background:#e7ecf2}
+  tbody th{background:#f0f3f6;font-weight:700}
+  select{width:100%;font-size:13px}
+  input,textarea{font-size:14px;padding:6px;font-family:inherit}
+  .note{font-size:13px;color:#5b6b78;margin:6px 0}
+  .err{color:#b91c1c;font-weight:700}
+  .ok{color:#0b5451;font-weight:700}
+  button{font-size:13px;padding:6px 12px;cursor:pointer;background:#0f766e;color:#fff;
+         border:none;border-radius:6px}
+  button.liten{padding:4px 10px;font-size:12px}
+  button.radera{background:#b91c1c}
+  button.gra{background:#64748b}
+  code{background:#eef2f5;padding:1px 5px;border-radius:4px}
+  .dold{display:none!important}
+  .vp-nav{display:flex;align-items:center;gap:12px;margin:10px 0;flex-wrap:wrap}
+  #veckoOversikt{display:flex;flex-wrap:wrap;gap:4px;margin:10px 0;background:#fff;
+                 padding:10px;border:1px solid #c6cfd8;border-radius:8px}
+  .veckoknapp{width:44px;padding:6px 0;background:#e2e8f0;color:#16232e;border-radius:6px}
+  .veckoknapp.planerad{background:#0f766e;color:#fff}
+  .veckoknapp.aktiv{outline:3px solid #f59e0b}
+
+  /* inloggning */
+  #login{max-width:420px;margin:60px auto;background:#fff;border:1px solid #c6cfd8;
+         border-radius:8px;padding:24px}
+  #login input{width:100%;margin:10px 0}
+
+  /* flikar */
+  #flikar{display:flex;gap:8px;margin:16px 0}
+  #flikar button{background:#cbd5e1;color:#16232e}
+  #flikar button.aktiv{background:#0f766e;color:#fff}
+
+  /* ratt-tabell */
+  .thumb{width:72px;height:48px;object-fit:cover;border-radius:6px;background:#e2e8f0;display:block}
+  .thumb-saknas{width:72px;height:48px;border-radius:6px;background:#e2e8f0;color:#64748b;
+                display:flex;align-items:center;justify-content:center;font-size:11px}
+
+  /* modal */
+  #modalBakgrund{position:fixed;inset:0;background:rgba(15,27,36,.55);display:flex;
+                 align-items:flex-start;justify-content:center;overflow:auto;padding:30px 10px;z-index:50}
+  #modal{background:#fff;border-radius:10px;padding:22px;width:640px;max-width:100%;
+         box-shadow:0 10px 40px rgba(0,0,0,.35)}
+  #modal h3{margin:0 0 14px}
+  #modal label{display:block;font-size:13px;font-weight:700;margin:10px 0 4px}
+  #modal input[type=text],#modal input[type=number],#modal textarea{width:100%}
+  #modal textarea{resize:vertical;min-height:54px}
+  #modal .rad{display:flex;gap:12px}
+  #modal .rad>div{flex:1}
+  #allergenRutor{display:flex;flex-wrap:wrap;gap:6px 14px;font-weight:400;font-size:13px;
+                 background:#f0f3f6;padding:10px;border-radius:6px}
+  #allergenRutor label{display:flex;align-items:center;gap:6px;margin:0;font-weight:400}
+  #bildForhandsvisning{margin-top:8px}
+  #bildForhandsvisning img{width:220px;height:140px;object-fit:cover;border-radius:8px;
+                           border:1px solid #c6cfd8}
+  #modalKnappar{display:flex;gap:10px;margin-top:18px;justify-content:flex-end}
+</style>
+</head>
+<body>
+
+<!-- ================== INLOGGNING ================== -->
+<div id="login">
+  <h1>Menybackend – logga in</h1>
+  <div class="note">Ange admin-token (sätts via miljövariabeln <code>ADMIN_TOKEN</code> när servern startas).</div>
+  <input id="token" type="password" placeholder="Admin-token" />
+  <button id="loggaIn">Logga in</button>
+  <div id="loginFel" class="err"></div>
+</div>
+
+<!-- ================== INNEHÅLL ================== -->
+<div id="innehall" class="dold">
+  <h1>Dagens lunch – backend</h1>
+  <div class="note">
+    <button id="knappNyRatt">+ Ny rätt</button>
+    <button id="knappUppdatera" class="gra">Uppdatera listor</button>
+    <button id="knappForhandsvisa" class="gra">Förhandsvisa dagens meny</button>
+    <span id="sparaStatus" class="ok"></span>
+  </div>
+
+  <div id="flikar">
+    <button data-flik="ratter" class="aktiv">Rätter</button>
+    <button data-flik="schema">Veckoschema</button>
+    <button data-flik="undantag">Datum-undantag</button>
+    <button data-flik="veckoplan">Veckoplanering</button>
+  </div>
+
+  <!-- ---------- flik: rätter ---------- -->
+  <div id="flik-ratter">
+    <div id="rattLista"></div>
+    <div class="note">Klicka på <strong>Redigera</strong> för att ändra en rätt eller ladda upp en ny bild. Ändringarna blir direkt synliga på matsalsskärmen.</div>
+  </div>
+
+  <!-- ---------- flik: veckoschema ---------- -->
+  <div id="flik-schema" class="dold">
+    <div id="vecka"></div>
+    <div class="note">Spara sker automatiskt när du ändrar en rullgardinslista. Tomma rutor = ingen lunch den dagen. Max 3 måltider per dag.</div>
+  </div>
+
+  <!-- ---------- flik: undantag ---------- -->
+  <div id="flik-undantag" class="dold">
+    <div id="undantag"></div>
+    <div class="note">
+      Ett undantag ersätter veckoschemat för det datumet. Lämnas alla tre rutorna tomma visas
+      "köket stängt" på skärmen. Ta bort undantaget med krysset så gäller veckoschemat igen.
+    </div>
+    <div class="note">
+      <input id="nyttDatum" type="date" />
+      <button id="laggTillUndantag">Lägg till undantag</button>
+    </div>
+  </div>
+
+  <!-- ---------- flik: veckoplanering ---------- -->
+  <div id="flik-veckoplan" class="dold">
+    <div class="vp-nav">
+      <button id="vpBakat" class="gra">&#9664; Föregående</button>
+      <strong id="vpEtikett"></strong>
+      <button id="vpFramat" class="gra">Nästa &#9654;</button>
+      <button id="vpIdag" class="gra">Gå till aktuell vecka</button>
+    </div>
+    <div id="veckoOversikt"></div>
+    <div id="veckoplanTabell"></div>
+    <div class="note">
+      Ändringar sparas direkt för just den här veckan. "Källa" visar om dagen har
+      <span class="ok">egen planering</span> eller följer <span class="note">standardschemat</span> &ndash;
+      väljer du alla tre rutor tomma blir dagen stängd just den veckan.
+    </div>
+    <div class="note">
+      <button id="vpKopieraStandard">Kopiera standardschemat till veckan</button>
+      <button id="vpKopieraForra">Kopiera föregående vecka</button>
+      <button id="vpRensa" class="radera">Rensa veckans planering</button>
+    </div>
+  </div>
+
+  <h2 style="margin-top:22px">Förhandsvisning</h2>
+  <div id="forhandsvisning" class="note"></div>
+</div>
+
+<!-- ================== MODAL: RÄTTREDIGERARE ================== -->
+<div id="modalBakgrund" class="dold">
+  <div id="modal">
+    <h3 id="modalRubrik">Ny rätt</h3>
+
+    <label for="fNamn">Namn *</label>
+    <input id="fNamn" type="text" placeholder="t.ex. Köttbullar med potatismos" />
+
+    <label for="fId">Id (genereras automatiskt)</label>
+    <input id="fId" type="text" readonly />
+
+    <label for="fBeskrivning">Beskrivning</label>
+    <textarea id="fBeskrivning" placeholder="Kort beskrivning som visas på skärmen"></textarea>
+
+    <label for="fInnehall">Innehåll</label>
+    <textarea id="fInnehall" placeholder="Ingredienser, t.ex. Köttfärs, lök, potatis, grädde"></textarea>
+
+    <div class="rad">
+      <div>
+        <label for="fPris">Pris (kr)</label>
+        <input id="fPris" type="number" min="0" step="1" placeholder="55" />
+      </div>
+      <div>
+        <label for="fUrsprung">Ursprung (valfritt)</label>
+        <input id="fUrsprung" type="text" placeholder="t.ex. Kött från Sverige" />
+      </div>
+    </div>
+
+    <label for="fTaggar">Taggar (kommaseparerat)</label>
+    <input id="fTaggar" type="text" placeholder="t.ex. vegetarisk, glutenfri" />
+
+    <label>Allergener</label>
+    <div id="allergenRutor"></div>
+
+    <label for="fBildFil">Bild</label>
+    <input id="fBildFil" type="file" accept="image/jpeg,image/png,image/webp" />
+    <div id="bildForhandsvisning"></div>
+    <div class="note">JPG/PNG/WebP, max 4 MB. Bilden laddas upp direkt när du väljer filen.</div>
+
+    <div id="modalFel" class="err"></div>
+
+    <div id="modalKnappar">
+      <button id="avbryt" class="gra">Avbryt</button>
+      <button id="sparaRatt">Spara rätt</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  let ratter = [];
+  let schema = { weekdays: {}, overrides: {} };
+  let allergenEtiketter = {};
+  let token = '';
+  let redigerarId = null;      // null = ny rätt, annars id på rätten som redigeras
+  let bildFil = '';            // filnamn på uppladdad bild
+
+  const el = id => document.getElementById(id);
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function slug(s) {
+    return String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ratt';
+  }
+
+  async function api(metod, url, body) {
+    const res = await fetch(url, {
+      method: metod,
+      headers: { 'content-type': 'application/json', 'x-admin-token': token },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    return data;
+  }
+
+  function visaStatus(text) {
+    el('sparaStatus').textContent = text;
+    setTimeout(() => { el('sparaStatus').textContent = ''; }, 3000);
+  }
+
+  /* ================== inloggning ================== */
+
+  el('loggaIn').addEventListener('click', async () => {
+    token = el('token').value.trim();
+    try {
+      await api('POST', baseUrl('api/admin/verify'));
+      allergenEtiketter = await fetch(baseUrl('api/allergen-labels')).then(r => r.json());
+      el('login').classList.add('dold');
+      el('innehall').classList.remove('dold');
+      await ladda();
+    } catch (err) {
+      el('loginFel').textContent = 'Fel token – försök igen.';
+    }
+  });
+  el('token').addEventListener('keydown', e => { if (e.key === 'Enter') el('loggaIn').click(); });
+
+  /* ================== hämta ================== */
+
+  async function ladda() {
+    [ratter, schema] = await Promise.all([
+      fetch(baseUrl('api/dishes')).then(r => r.json()),
+      fetch(baseUrl('api/schedule')).then(r => r.json()),
+    ]);
+    ritaRatter(); ritaVecka(); ritaUndantag(); ritaVeckoplan();
+  }
+
+  /* ================== flikar ================== */
+
+  document.querySelectorAll('#flikar button').forEach(knapp => {
+    knapp.addEventListener('click', () => {
+      document.querySelectorAll('#flikar button').forEach(k => k.classList.remove('aktiv'));
+      knapp.classList.add('aktiv');
+      ['ratter', 'schema', 'undantag', 'veckoplan'].forEach(f =>
+        el('flik-' + f).classList.toggle('dold', f !== knapp.dataset.flik));
+    });
+  });
+
+  /* ================== rattlista ================== */
+
+  function ritaRatter() {
+    el('rattLista').innerHTML =
+      '<table><thead><tr><th>Bild</th><th>Namn</th><th>Pris</th><th>Allergener</th>' +
+      '<th>Taggar</th><th></th></tr></thead><tbody>' +
+      ratter.map(d => `<tr>
+        <td>${d.image
+          ? `<img class="thumb" src="${baseUrl(`images/${encodeURIComponent(d.image)}`)}" alt="" onerror="this.outerHTML='<div class=&quot;thumb-saknas&quot;>bild saknas</div>'">`
+          : '<div class="thumb-saknas">ingen bild</div>'}</td>
+        <td><strong>${esc(d.name)}</strong><br><code>${esc(d.id)}</code></td>
+        <td>${d.price ?? ''} kr</td>
+        <td>${(d.allergens || []).map(a => esc(allergenEtiketter[a] || a)).join(', ') || '—'}</td>
+        <td>${(d.tags || []).map(t => esc(t)).join(', ') || '—'}</td>
+        <td>
+          <button class="liten" data-redigera="${esc(d.id)}">Redigera</button>
+          <button class="liten radera" data-radera="${esc(d.id)}">Ta bort</button>
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+  }
+
+  /* ================== rattredigerare ================== */
+
+  function oppnaModal(ratt) {
+    redigerarId = ratt ? ratt.id : null;
+    bildFil = ratt ? (ratt.image || '') : '';
+    el('modalRubrik').textContent = ratt ? `Redigera: ${ratt.name}` : 'Ny rätt';
+    el('fNamn').value = ratt ? ratt.name : '';
+    el('fId').value = ratt ? ratt.id : '';
+    el('fBeskrivning').value = ratt ? ratt.description : '';
+    el('fInnehall').value = ratt ? ratt.ingredients : '';
+    el('fPris').value = ratt && ratt.price !== null ? ratt.price : '';
+    el('fUrsprung').value = ratt ? (ratt.origin || '') : '';
+    el('fTaggar').value = ratt ? (ratt.tags || []).join(', ') : '';
+    el('fBildFil').value = '';
+    el('modalFel').textContent = '';
+
+    /* allergenkryssrutor */
+    el('allergenRutor').innerHTML = Object.entries(allergenEtiketter).map(([kod, etikett]) =>
+      `<label><input type="checkbox" value="${kod}" ${ratt && (ratt.allergens || []).includes(kod) ? 'checked' : ''}> ${esc(etikett)}</label>`).join('');
+
+    visaBild();
+    el('modalBakgrund').classList.remove('dold');
+    el('fNamn').focus();
+  }
+
+  function stangModal() { el('modalBakgrund').classList.add('dold'); }
+
+  function visaBild() {
+    el('bildForhandsvisning').innerHTML = bildFil
+      ? `<img src="${baseUrl(`images/${encodeURIComponent(bildFil)}`)}?t=${Date.now()}" alt="Förhandsvisning av bild" />
+         <div class="note">Fil: <code>${esc(bildFil)}</code> <button class="liten gra" id="taBortBild">Ta bort bilden</button></div>`
+      : '<div class="note">Ingen bild vald.</div>';
+  }
+
+  /* id förhandsfylls utifrån namnet på nya rätter */
+  el('fNamn').addEventListener('input', () => {
+    if (!redigerarId) el('fId').value = slug(el('fNamn').value);
+  });
+
+  /* bilduppladdning sker direkt när filen väljs */
+  el('fBildFil').addEventListener('change', async () => {
+    const fil = el('fBildFil').files[0];
+    el('modalFel').textContent = '';
+    if (!fil) return;
+    if (fil.size > 4 * 1024 * 1024) { el('modalFel').textContent = 'Filen är större än 4 MB.'; return; }
+
+    const ult = fil.name.split('.').pop().toLowerCase();
+    const namn = (redigerarId || slug(el('fNamn').value) || 'ratt') + '.' + ult;
+
+    try {
+      const dataUrl = await new Promise((ok, fel) => {
+        const l = new FileReader();
+        l.onload = () => ok(l.result);
+        l.onerror = () => fel(new Error('Kunde inte läsa filen'));
+        l.readAsDataURL(fil);
+      });
+      const base64 = String(dataUrl).split(',')[1] || '';
+      await api('POST', baseUrl(`api/images/${encodeURIComponent(namn)}`), { base64 });
+      bildFil = namn;
+      visaBild();
+      visaStatus('Bilden är uppladdad.');
+    } catch (err) {
+      el('modalFel').textContent = 'Kunde inte ladda upp bilden: ' + err.message;
+    }
+  });
+
+  el('bildForhandsvisning').addEventListener('click', e => {
+    if (e.target.id === 'taBortBild') { bildFil = ''; visaBild(); }
+  });
+
+  el('sparaRatt').addEventListener('click', async () => {
+    el('modalFel').textContent = '';
+    const namn = el('fNamn').value.trim();
+    if (!namn) { el('modalFel').textContent = 'Namnet är obligatoriskt.'; return; }
+
+    const ratt = {
+      id: redigerarId || el('fId').value || slug(namn),
+      name: namn,
+      description: el('fBeskrivning').value.trim(),
+      ingredients: el('fInnehall').value.trim(),
+      allergens: [...el('allergenRutor').querySelectorAll('input:checked')].map(i => i.value),
+      tags: el('fTaggar').value.split(',').map(t => t.trim()).filter(Boolean),
+      price: el('fPris').value === '' ? null : Number(el('fPris').value),
+      image: bildFil,
+      origin: el('fUrsprung').value.trim(),
+    };
+
+    try {
+      if (redigerarId) {
+        await api('PUT', baseUrl(`api/dishes/${encodeURIComponent(redigerarId)}`), ratt);
+        visaStatus(`Rätten "${ratt.name}" är uppdaterad.`);
+      } else {
+        await api('POST', 'api/dishes', ratt);
+        visaStatus(`Rätten "${ratt.name}" är skapad.`);
+      }
+      stangModal();
+      await ladda();
+    } catch (err) {
+      el('modalFel').textContent = 'Kunde inte spara: ' + err.message;
+    }
+  });
+
+  el('avbryt').addEventListener('click', stangModal);
+
+  /* ================== veckoschema + undantag ================== */
+
+  function alternativ(valda) {
+    const tom = '<option value="">– tom –</option>';
+    return tom + ratter.map(d =>
+      `<option value="${esc(d.id)}"${d.id === valda ? ' selected' : ''}>${esc(d.name)}</option>`).join('');
+  }
+
+  function saknade(ids) {
+    return (ids || []).filter(id => !ratter.some(d => d.id === id));
+  }
+
+  function ritaVecka() {
+    const dagar = [null, 'Måndag', 'Tisdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lördag', 'Söndag'];
+    el('vecka').innerHTML =
+      '<table><thead><tr><th>Dag</th><th>Måltid 1</th><th>Måltid 2</th><th>Måltid 3</th><th></th></tr></thead><tbody>' +
+      [1, 2, 3, 4, 5, 6, 7].map(vd => {
+        const ids = schema.weekdays[String(vd)] || [];
+        const celler = [0, 1, 2].map(i =>
+          `<td><select data-vd="${vd}">${alternativ(ids[i] || '')}</select></td>`);
+        const varning = saknade(ids).length
+          ? '<td class="err">⚠ Rätten har tagits bort</td>' : '<td></td>';
+        return `<tr><th>${dagar[vd]}</th>${celler.join('')}${varning}</tr>`;
+      }).join('') + '</tbody></table>';
+  }
+
+  function ritaUndantag() {
+    const poster = Object.entries(schema.overrides || {}).sort(([a], [b]) => a.localeCompare(b));
+    el('undantag').innerHTML =
+      '<table><thead><tr><th>Datum</th><th>Måltid 1</th><th>Måltid 2</th><th>Måltid 3</th><th></th></tr></thead><tbody>' +
+      (poster.map(([datum, ids]) => {
+        const celler = [0, 1, 2].map(i =>
+          `<td><select data-datum="${datum}">${alternativ(ids[i] || '')}</select></td>`);
+        return `<tr><th>${datum}</th>${celler.join('')}<td><button class="liten radera" data-ta-undantag="${datum}">✕</button></td></tr>`;
+      }).join('') || '<tr><td colspan="5" class="note">Inga undantag sparade.</td></tr>') +
+      '</tbody></table>';
+  }
+
+  /* ================== veckoplanering (ISO-veckor) ================== */
+
+  let visadVecka = isoWeekKey(dagStr(new Date()));
+
+  function dagStr(d) {   // Date -> 'YYYY-MM-DD' (lokal tid)
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function isoWeekKey(datum) {   // 'YYYY-MM-DD' -> 'YYYY-Wvv'
+    const [y, m, d] = datum.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    const dag = dt.getUTCDay() || 7;
+    dt.setUTCDate(dt.getUTCDate() + 4 - dag);
+    const arStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
+    const vecka = Math.ceil(((dt - arStart) / 86400000 + 1) / 7);
+    return `${dt.getUTCFullYear()}-W${String(vecka).padStart(2, '0')}`;
+  }
+
+  function veckorIAret(ar) {     // 52 eller 53 enligt ISO-8601
+    const jan1 = new Date(Date.UTC(ar, 0, 1));
+    const skott = (ar % 4 === 0 && ar % 100 !== 0) || ar % 400 === 0;
+    return (jan1.getUTCDay() === 4 || (skott && jan1.getUTCDay() === 3)) ? 53 : 52;
+  }
+
+  function veckaMandag(key) {    // 'YYYY-Wvv' -> måndagen som Date (UTC)
+    const [ar, v] = key.split('-W').map(Number);
+    const jan4 = new Date(Date.UTC(ar, 0, 4));
+    const dag = jan4.getUTCDay() || 7;
+    const m = new Date(jan4);
+    m.setUTCDate(jan4.getUTCDate() - (dag - 1) + (v - 1) * 7);
+    return m;
+  }
+
+  function veckaSkift(n) {       // veckonyckel n veckor från den visade
+    const m = veckaMandag(visadVecka);
+    m.setUTCDate(m.getUTCDate() + n * 7);
+    return isoWeekKey(`${m.getUTCFullYear()}-${String(m.getUTCMonth() + 1).padStart(2, '0')}-${String(m.getUTCDate()).padStart(2, '0')}`);
+  }
+
+  function visaVecka(key) { visadVecka = key; ritaVeckoplan(); }
+
+  function ritaVeckoplan() {
+    const m = veckaMandag(visadVecka);
+    const son = new Date(m); son.setUTCDate(m.getUTCDate() + 6);
+    const fmt = d => d.toLocaleDateString('sv-SE', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+    const [ar, v] = visadVecka.split('-W').map(Number);
+
+    el('vpEtikett').textContent = `Vecka ${v} · ${ar}  (${fmt(m)} – ${fmt(son)})`;
+
+    /* årsoversikt: en knapp per vecka, grön = egen planering */
+    el('veckoOversikt').innerHTML =
+      Array.from({ length: veckorIAret(ar) }, (_, i) => {
+        const nyckel = `${ar}-W${String(i + 1).padStart(2, '0')}`;
+        const planerad = !!(schema.weeks && schema.weeks[nyckel]);
+        return `<button class="veckoknapp${planerad ? ' planerad' : ''}${nyckel === visadVecka ? ' aktiv' : ''}" data-vp-hoppa="${nyckel}">${i + 1}</button>`;
+      }).join('');
+
+    const plan = (schema.weeks || {})[visadVecka] || {};
+    const dagar = [null, 'Måndag', 'Tisdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lördag', 'Söndag'];
+    el('veckoplanTabell').innerHTML =
+      '<table><thead><tr><th>Dag</th><th>Måltid 1</th><th>Måltid 2</th><th>Måltid 3</th><th>Källa</th></tr></thead><tbody>' +
+      [1, 2, 3, 4, 5, 6, 7].map(vd => {
+        const egen = plan[String(vd)] !== undefined;
+        const ids = egen ? plan[String(vd)] : (schema.weekdays[String(vd)] || []);
+        const kalla = egen
+          ? (ids.length ? '<span class="ok">egen planering</span>' : '<span class="err">egen: stängt</span>')
+          : '<span class="note">standard</span>';
+        const celler = [0, 1, 2].map(i =>
+          `<td><select data-vp="${visadVecka}" data-dag="${vd}">${alternativ(ids[i] || '')}</select></td>`);
+        return `<tr><th>${dagar[vd]}</th>${celler.join('')}<td>${kalla}</td></tr>`;
+      }).join('') + '</tbody></table>';
+  }
+
+
+  document.addEventListener('change', async e => {
+    const sel = e.target;
+    if (sel.tagName !== 'SELECT') return;
+    try {
+      if (sel.dataset.vd) {
+        const ids = [...sel.closest('tr').querySelectorAll('select')].map(s => s.value).filter(Boolean);
+        await api('PUT', baseUrl(`api/schedule/weekday/${sel.dataset.vd}`), { dishIds: ids });
+      } else if (sel.dataset.datum) {
+        const ids = [...sel.closest('tr').querySelectorAll('select')].map(s => s.value).filter(Boolean);
+        await api('PUT', baseUrl(`api/schedule/override/${sel.dataset.datum}`), { dishIds: ids });
+      } else if (sel.dataset.vp) {
+        const ids = [...sel.closest('tr').querySelectorAll('select')].map(s => s.value).filter(Boolean);
+        await api('PUT', baseUrl(`api/schedule/week/${sel.dataset.vp}/${sel.dataset.dag}`), { dishIds: ids });
+      }
+    } catch (err) { alert('Kunde inte spara: ' + err.message); }
+    await ladda();
+  });
+
+  /* ================== övriga knappar ================== */
+
+  el('knappNyRatt').addEventListener('click', () => oppnaModal(null));
+  el('knappUppdatera').addEventListener('click', () => ladda());
+  el('knappForhandsvisa').addEventListener('click', async () => {
+    try {
+      const m = await fetch(baseUrl('api/menu/today')).then(r => r.json());
+      const lista = m.dishes.map(d =>
+        `<div>${esc(d.name)} · ${d.price ?? ''} kr · ${(d.allergens || []).join(', ') || 'inga allergener'}</div>`).join('');
+      el('forhandsvisning').innerHTML =
+        `<div>${esc(m.weekdayName)} ${m.date} · ${m.dishes.length} måltider</div>${lista || '<div>Ingen lunch i dag.</div>'}`;
+    } catch (err) { el('forhandsvisning').textContent = 'Kunde inte hämta menyn.'; }
+  });
+
+  el('laggTillUndantag').addEventListener('click', async () => {
+    const datum = el('nyttDatum').value;
+    if (!datum) { alert('Välj ett datum först.'); return; }
+    try {
+      await api('PUT', baseUrl(`api/schedule/override/${datum}`), { dishIds: [] });
+      await ladda();
+    } catch (err) { alert(err.message); }
+  });
+
+  document.addEventListener('click', async e => {
+    const b = e.target;
+
+    if (b.dataset.redigera) {
+      const ratt = ratter.find(d => d.id === b.dataset.redigera);
+      if (ratt) oppnaModal(ratt);
+    }
+
+    if (b.dataset.radera) {
+      const id = b.dataset.radera;
+      if (!confirm(`Ta bort rätten "${id}"? Den försvinner ur alla scheman.`)) return;
+      try { await api('DELETE', baseUrl(`api/dishes/${encodeURIComponent(id)}`)); await ladda(); }
+      catch (err) { alert(err.message); }
+    }
+
+    if (b.dataset.taUndantag) {
+      try { await api('DELETE', baseUrl(`api/schedule/override/${b.dataset.taUndantag}`)); await ladda(); }
+      catch (err) { alert(err.message); }
+    }
+
+    if (b.dataset.vpHoppa) visaVecka(b.dataset.vpHoppa);
+
+    if (b.id === 'vpBakat') visaVecka(veckaSkift(-1));
+    if (b.id === 'vpFramat') visaVecka(veckaSkift(1));
+    if (b.id === 'vpIdag') visaVecka(isoWeekKey(dagStr(new Date())));
+
+    if (b.id === 'vpKopieraStandard') {
+      if (!confirm(`Kopiera standardschemat till ${visadVecka}? Befintlig planering för veckan skrivs över.`)) return;
+      const days = {};
+      for (let vd = 1; vd <= 7; vd++) days[vd] = schema.weekdays[String(vd)] || [];
+      try { await api('PUT', baseUrl(`api/schedule/week/${visadVecka}`), { days }); await ladda(); }
+      catch (err) { alert(err.message); }
+    }
+
+    if (b.id === 'vpKopieraForra') {
+      const forra = veckaSkift(-1);
+      const plan = (schema.weeks || {})[forra];
+      if (!plan || !Object.keys(plan).length) { alert(`Vecka ${forra.split('-W')[1]} har ingen planering att kopiera.`); return; }
+      if (!confirm(`Kopiera vecka ${forra.split('-W')[1]} till ${visadVecka}? Befintlig planering skrivs över.`)) return;
+      try { await api('PUT', baseUrl(`api/schedule/week/${visadVecka}`), { days: plan }); await ladda(); }
+      catch (err) { alert(err.message); }
+    }
+
+    if (b.id === 'vpRensa') {
+      if (!confirm(`Rensa planeringen för ${visadVecka}? Standardschemat gäller igen.`)) return;
+      try { await api('DELETE', baseUrl(`api/schedule/week/${visadVecka}`)); await ladda(); }
+      catch (err) { alert(err.message); }
+    }
+  });
+
+  /* stäng modalen med Escape eller klick utanför */
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') stangModal(); });
+  el('modalBakgrund').addEventListener('click', e => { if (e.target === el('modalBakgrund')) stangModal(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Installera beroenden
+        run: npm ci
+
+      - name: Syntaxkontroll
+        run: node --check src/server.js
+
+      - name: JSON-validering
+        run: python3 -m json.tool data/meals.json > /dev/null
+
+      - name: Röktest – starta servern och slå upp dagens meny
+        run: |
+          ADMIN_TOKEN=ci-token PORT=3100 node src/server.js &
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:3100/meny/api/menu/today > /dev/null && exit 0
+            sleep 0.5
+          done
+          echo "Servern svarade inte i tid"; exit 1
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bygg Docker-image
+        run: docker build -t matsal-menu:ci .
+
+      - name: Starta container och testa
+        run: |
+          docker run -d --name test -p 3200:3000 -e ADMIN_TOKEN=ci-token matsal-menu:ci
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:3200/meny/api/menu/today > /dev/null && exit 0
+            sleep 0.5
+          done
+          echo "Containern svarade inte i tid"; exit 1

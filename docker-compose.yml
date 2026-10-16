@@ -1,0 +1,24 @@
+services:
+  matsal-menu:
+    build: .
+    image: matsal-menu:latest
+    container_name: matsal-menu
+    restart: unless-stopped
+    ports:
+      # ändra värdport via .env om 3000 är upptagen, t.ex. VARDPORT=3001
+      - "${VARDPORT:-3000}:3000"
+    environment:
+      # ändra token! kan också sättas via .env-fil (se .env.example) (openssl rand -hex 32)
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-bytt-detta-token-i-produktion}
+      - PORT=3000
+      - BASE_PATH=${BASE_PATH:-/meny}
+      # tidszon påverkar "dagens meny" och klockan på skärmen
+      - TZ=${TZ:-Europe/Stockholm}
+    volumes:
+      # all data (rätter, schema, veckoplanering) och bilder överlever omstart
+      - matsal-data:/app/data
+      - matsal-images:/app/images
+
+volumes:
+  matsal-data:
+  matsal-images:
