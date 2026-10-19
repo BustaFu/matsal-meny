@@ -164,6 +164,8 @@ app.use(express.json({ limit: '2mb' }));
 
 function page(name) {
   return (req, res) => {
+    // always validate HTML in the browser: prevents stale scripts in kiosk mode
+    res.set('Cache-Control', 'no-cache');
     res.type('html').sendFile(path.join(PUBLIC_DIR, name));
   };
 }
