@@ -258,10 +258,29 @@ function baseUrl(sökväg) {
   /* ================== hämta ================== */
 
   async function ladda() {
-    [ratter, schema] = await Promise.all([
-      fetch(baseUrl('api/dishes')).then(r => r.json()),
-      fetch(baseUrl('api/schedule')).then(r => r.json()),
+    /* dishes och schedule kräver x-admin-token i den härdade servern */
+    const huvud = { 'x-admin-token': token };
+    const [ratterSvar, schemaSvar] = await Promise.all([
+      fetch(baseUrl('api/dishes'), { headers: huvud }),
+      fetch(baseUrl('api/schedule'), { headers: huvud }),
     ]);
+    if (!ratterSvar.ok || !schemaSvar.ok) {
+      if (ratterSvar.status === 401 || schemaSvar.status === 401) {
+        /* token har upphört att gälla – visa inloggningsrutan igen */
+        token = '';
+        el('innehall').classList.add('dold');
+        el('login').classList.remove('dold');
+        el('loginFel').textContent = 'Sessionen upphörde – logga in igen.';
+        return;
+      }
+      throw new Error('Kunde inte hämta data (' + ratterSvar.status + '/' + schemaSvar.status + ')');
+    }
+    ratter = await ratterSvar.json();
+    schema = await schemaSvar.json();
+    if (!Array.isArray(ratter)) ratter = [];
+    schema.weekdays ??= {};
+    schema.overrides ??= {};
+    schema.weeks ??= {};
     ritaRatter(); ritaVecka(); ritaUndantag(); ritaVeckoplan();
   }
 
