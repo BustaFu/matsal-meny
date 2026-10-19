@@ -102,6 +102,7 @@ function baseUrl(sökväg) {
     <button data-flik="schema">Veckoschema</button>
     <button data-flik="undantag">Datum-undantag</button>
     <button data-flik="veckoplan">Veckoplanering</button>
+    <button data-flik="visning">Visning</button>
   </div>
 
   <!-- ---------- flik: rätter ---------- -->
@@ -148,6 +149,34 @@ function baseUrl(sökväg) {
       <button id="vpKopieraStandard">Kopiera standardschemat till veckan</button>
       <button id="vpKopieraForra">Kopiera föregående vecka</button>
       <button id="vpRensa" class="radera">Rensa veckans planering</button>
+    </div>
+  </div>
+
+  <!-- ---------- flik: visning ---------- -->
+  <div id="flik-visning" class="dold">
+    <label for="fUnderrubrik" style="display:block;font-size:13px;font-weight:700;margin:10px 0 4px">
+      Underrubrik (visas längst ner på skärmen)
+    </label>
+    <textarea id="fUnderrubrik" style="width:100%;min-height:54px;resize:vertical"
+      placeholder="t.ex. Alla måltider serveras med bröd, salladsbuffé, vatten och mjölk."></textarea>
+
+    <label for="fStangtMeddelande" style="display:block;font-size:13px;font-weight:700;margin:12px 0 4px">
+      Meddelande när köket är stängt
+    </label>
+    <input id="fStangtMeddelande" type="text" style="width:100%"
+      placeholder="t.ex. Köket är stängt i dag – glöm inte din matsäck" />
+
+    <label for="fUppdatering" style="display:block;font-size:13px;font-weight:700;margin:12px 0 4px">
+      Uppdateringsintervall på skärmen (sekunder, 5–3600)
+    </label>
+    <input id="fUppdatering" type="number" min="5" max="3600" step="1" style="width:140px" />
+
+    <div style="margin-top:16px">
+      <button id="sparaVisning">Spara visningsinställningar</button>
+    </div>
+    <div class="note">
+      Ändringarna syns på matsalsskärmen vid dess nästa automatiska uppdatering –
+      senast inom intervallet ovan.
     </div>
   </div>
 
@@ -282,6 +311,7 @@ function baseUrl(sökväg) {
     schema.overrides ??= {};
     schema.weeks ??= {};
     ritaRatter(); ritaVecka(); ritaUndantag(); ritaVeckoplan();
+    laddaVisning();
   }
 
   /* ================== flikar ================== */
@@ -290,7 +320,7 @@ function baseUrl(sökväg) {
     knapp.addEventListener('click', () => {
       document.querySelectorAll('#flikar button').forEach(k => k.classList.remove('aktiv'));
       knapp.classList.add('aktiv');
-      ['ratter', 'schema', 'undantag', 'veckoplan'].forEach(f =>
+      ['ratter', 'schema', 'undantag', 'veckoplan', 'visning'].forEach(f =>
         el('flik-' + f).classList.toggle('dold', f !== knapp.dataset.flik));
     });
   });
@@ -620,6 +650,36 @@ function baseUrl(sökväg) {
       if (!confirm(`Rensa planeringen för ${visadVecka}? Standardschemat gäller igen.`)) return;
       try { await api('DELETE', baseUrl(`api/schedule/week/${visadVecka}`)); await ladda(); }
       catch (err) { alert(err.message); }
+    }
+  });
+
+  /* ================== visningsinställningar ================== */
+
+  async function laddaVisning() {
+    try {
+      const m = await fetch(baseUrl('api/menu/today')).then(r => r.json());
+      const d = (m && m.display) || {};
+      el('fUnderrubrik').value = d.subtitle || '';
+      el('fStangtMeddelande').value = d.closedMessage || '';
+      el('fUppdatering').value = d.refreshSeconds || 30;
+    } catch (err) { /* fälten lämnas tomma vid fel */ }
+  }
+
+  el('sparaVisning').addEventListener('click', async () => {
+    const sekunder = Number(el('fUppdatering').value);
+    if (!Number.isInteger(sekunder) || sekunder < 5 || sekunder > 3600) {
+      alert('Uppdateringsintervallet måste vara ett heltal mellan 5 och 3600 sekunder.');
+      return;
+    }
+    try {
+      await api('PUT', baseUrl('api/display'), {
+        subtitle: el('fUnderrubrik').value,
+        closedMessage: el('fStangtMeddelande').value,
+        refreshSeconds: sekunder,
+      });
+      visaStatus('Visningsinställningar sparade.');
+    } catch (err) {
+      alert('Kunde inte spara: ' + err.message);
     }
   });
 

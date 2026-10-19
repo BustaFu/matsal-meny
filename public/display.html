@@ -174,7 +174,16 @@ function baseUrl(sökväg) {
     .catch(() => { allergenEtiketter = {}; rendera(); renderaBotten(); });
 
   uppdatera();
-  setInterval(() => uppdatera().then(rendera, rendera).then(renderaBotten), 30_000); // hämta nya menyn
+
+  /* hämtningsintervallet styrs av display.refreshSeconds (standard 30 s) */
+  function schemalagg() {
+    const sekunder = Number((meny && meny.display && meny.display.refreshSeconds) || 30);
+    setTimeout(() => {
+      uppdatera().then(rendera, rendera).then(renderaBotten).finally(schemalagg);
+    }, Math.max(5, sekunder) * 1000);
+  }
+  schemalagg();
+
   setInterval(() => { rendera(); renderaBotten(); }, 1000);                          // klockan
 </script>
 </body>
