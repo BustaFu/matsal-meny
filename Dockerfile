@@ -15,20 +15,18 @@ FROM node:22-slim
 ENV NODE_ENV=production
 WORKDIR /app
 
-# kör som icke-root-användare
-RUN groupadd --system matsal && \
-    useradd --system --gid matsal --no-create-home matsal
-
+# kör som icke-root: imaget inbyggda användaren "node" (uid/gid 1000).
+# FAST uid är viktigt – datavolymer bevarar filägaren mellan image-byten.
 COPY --from=build /app/node_modules ./node_modules
-COPY --chown=matsal:matsal src ./src
-COPY --chown=matsal:matsal public ./public
-COPY --chown=matsal:matsal data ./data
-COPY --chown=matsal:matsal images ./images
+COPY --chown=node:node src ./src
+COPY --chown=node:node public ./public
+COPY --chown=node:node data ./data
+COPY --chown=node:node images ./images
 
 # data och bilder ska kunna ändras i körande container (docker run -v / compose-volymer)
-RUN chown -R matsal:matsal /app/data /app/images
+RUN chown -R node:node /app/data /app/images
 
-USER matsal
+USER node
 EXPOSE 3000
 
 # hälsokoll med node (slim saknar wget) – följer PORT och BASE_PATH
