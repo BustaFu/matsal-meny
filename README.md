@@ -1,15 +1,21 @@
 # Matsal-menyn
-
 Webbbaserad lunchmeny för skolmatsal. Backend (Node.js/Express) styr rätter, schema och
 veckoplanering; frontend är en fullskärmssida för en webbläsare/TV i matsalen som **endast**
 visar dagens måltider (max 3 per dag).
 
+![Meny Exempel](docs/Public_Meny.png)
 - **Visning** (matsalsskärm): `/meny` – dagens måltider med bild, innehåll, allergener och pris
 - **Backend** (kökspersonal): `/meny/admin` – redigera rätter, veckoschema, veckoplanering och datum-undantag
+
+## Admin backend (Screenshot)
+![Admin Config_Ratter_Exempel](docs/Admin_Ratter_Config.png)
+![Admin Veckoplanering_Exempel](docs/Admin_Veckoplanering.png)
 
 ## Kom igång med Docker (rekommenderas)
 
 ```bash
+git clone https://github.com/BustaFu/matsal-meny.git
+cd matsal-meny
 cp .env.example .env      # öppna .env och byt ADMIN_TOKEN!
 docker compose up -d --build
 ```
@@ -23,6 +29,8 @@ omstart och uppgraderingar. Loggar: `docker compose logs -f`.
 ## Kom igång utan Docker
 
 ```bash
+git clone https://github.com/BustaFu/matsal-meny.git
+cd matsal-meny
 npm install
 ADMIN_TOKEN='byt-mot-något-hemligt' npm start
 ```
