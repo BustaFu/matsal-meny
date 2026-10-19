@@ -1,37 +1,84 @@
 'use strict';
-
-/* =========================================================
-   Matsal-menyn – webbbaserad lunchmeny för skola
-   ---------------------------------------------------------
-   <bas>/         -> kioskvisning i fullskärm (endast dagens måltider)
-   <bas>/admin    -> backend-gränssnitt (skyddas med x-admin-token)
-   Bas-sökvägen (<bas>) styrs med miljövariabeln BASE_PATH, standard /meny.
-   BASE_PATH="" kör allt i roten: http://localhost:3000/ och /admin.
-   Backend äger: rätter, veckoschema och datum-undantag.
-   Frontend ser aldrig schemat – bara den färdiga dagens meny.
-   ========================================================= */
-
+/*
+ * Matsal-menyn
+ *
+ * Public:
+ *   GET  /                 -> kiosk display
+ *   GET  /display          -> kiosk display
+ *   GET  /api/menu/today   -> today's resolved menu
+ *   GET  /api/menu/:date   -> resolved menu for a date
+ *   GET  /api/allergen-labels
+ *
+ * Admin (x-admin-token required):
+ *   GET  /api/dishes
+ *   GET  /api/schedule
+ *   POST /api/dishes
+ *   PUT/DELETE /api/dishes/:id
+ *   PUT /api/schedule/weekday/:wd
+ *   PUT/DELETE /api/schedule/week/:key
+ *   PUT /api/schedule/week/:key/:wd
+ *   PUT/DELETE /api/schedule/override/:date
+ *   PUT /api/display
+ *   POST /api/images/:name
+ *   POST /api/admin/verify
+ *
+ * Environment:
+ *   PORT
+ *   ADMIN_TOKEN (required; at least 32 bytes)
+ *   BASE_PATH (default /meny; empty string for root)
+ *   TZ should be Europe/Stockholm in the deployment environment.
+ */
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const helmet = require('helmet');
+const { rateLimit } = require('express-rate-limit');
+const sharp = require('sharp');
 
-const ROOT = path.join(__dirname, '..');  // projektroten (server.js ligger i src/)
-const DATA_FILE = path.join(ROOT, 'data', 'meals.json');
+const ROOT = path.resolve(__dirname, '..');
+const DATA_DIR = path.join(ROOT, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'meals.json');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const IMAGES_DIR = path.join(ROOT, 'images');
 
 const PORT = Number(process.env.PORT || 3000);
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'dev-token-change-me';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 const MAX_MEALS_PER_DAY = 3;
+const MAX_IMAGE_BYTES = 4_000_000;
+const MAX_IMAGE_PIXELS = 20_000_000;
+const MAX_IMAGE_DIMENSION = 8000;
 
-// Bas-sökväg: "/meny" (standard), t.ex. "/mat", eller "" för att köra i roten
-const RAW_BASE = (process.env.BASE_PATH ?? '/meny').trim().replace(/\/+$/, '');
-const BASE_PATH = RAW_BASE && !RAW_BASE.startsWith('/') ? '/' + RAW_BASE : RAW_BASE;
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error('PORT must be an integer between 1 and 65535');
+}
+if (
+  typeof ADMIN_TOKEN !== 'string' ||
+  Buffer.byteLength(ADMIN_TOKEN, 'utf8') < 32
+) {
+  throw new Error(
+    'ADMIN_TOKEN must be configured and contain at least 32 bytes'
+  );
+}
 
-const VECKODAGAR = [null, 'Måndag', 'Tisdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lördag', 'Söndag'];
+const RAW_BASE = (process.env.BASE_PATH ?? '/meny')
+  .trim()
+  .replace(/\/+$/, '');
+if (RAW_BASE && !/^\/[a-zA-Z0-9/_-]+$/.test(
+  RAW_BASE.startsWith('/') ? RAW_BASE : `/${RAW_BASE}`
+)) {
+  throw new Error('BASE_PATH contains unsupported characters');
+}
+const BASE_PATH = RAW_BASE
+  ? (RAW_BASE.startsWith('/') ? RAW_BASE : `/${RAW_BASE}`)
+  : '';
 
-const ALLERGEN_ETIKETTER = {
+const VECKODAGAR = [
+  null, 'Måndag', 'Tisdag', 'Onsdag',
+  'Torsdag', 'Fredag', 'Lördag', 'Söndag'
+];
+
+const ALLERGEN_ETIKETTER = Object.freeze({
   gluten: 'Gluten',
   skalddjur: 'Skaldjur',
   agg: 'Ägg',
@@ -44,295 +91,882 @@ const ALLERGEN_ETIKETTER = {
   sesam: 'Sesam',
   svavel: 'Svaveldioxid/sulfiter',
   lupin: 'Lupin',
-  blodskaldjur: 'Blötdjur',
-};
+  blodskaldjur: 'Blötdjur'
+});
+const ALLOWED_ALLERGENS = new Set(
+  Object.keys(ALLERGEN_ETIKETTER)
+);
+const ALLOWED_IMAGE_EXTENSIONS = new Set([
+  'jpg', 'jpeg', 'png', 'webp'
+]);
+const MAX_TEXT_LENGTH = 5000;
+const MAX_NAME_LENGTH = 200;
+const MAX_ID_LENGTH = 80;
+const MAX_TAGS = 30;
+const MAX_ALLERGENS = 14;
 
-/* ---------------- datalager ---------------- */
+let store;
+let writeQueue = Promise.resolve();
 
-let store = null;
+/* ---------------- initialization ---------------- */
+
+function ensureDirectories() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(IMAGES_DIR, { recursive: true });
+  for (const file of [PUBLIC_DIR]) {
+    if (!fs.existsSync(file) || !fs.statSync(file).isDirectory()) {
+      throw new Error(`Required directory missing: ${file}`);
+    }
+  }
+}
+
+function validateLoadedStore(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('meals.json must contain a JSON object');
+  }
+  data.dishes ??= [];
+  data.schedule ??= {};
+  data.schedule.weekdays ??= {};
+  data.schedule.overrides ??= {};
+  data.schedule.weeks ??= {};
+  data.display ??= {};
+  if (
+    !Array.isArray(data.dishes) ||
+    !data.schedule || typeof data.schedule !== 'object' ||
+    Array.isArray(data.schedule) ||
+    !data.schedule.weekdays ||
+    typeof data.schedule.weekdays !== 'object' ||
+    Array.isArray(data.schedule.weekdays) ||
+    !data.schedule.overrides ||
+    typeof data.schedule.overrides !== 'object' ||
+    Array.isArray(data.schedule.overrides) ||
+    !data.schedule.weeks ||
+    typeof data.schedule.weeks !== 'object' ||
+    Array.isArray(data.schedule.weeks) ||
+    !data.display ||
+    typeof data.display !== 'object' ||
+    Array.isArray(data.display)
+  ) {
+    throw new Error('meals.json has an invalid structure');
+  }
+  const seen = new Set();
+  for (const dish of data.dishes) {
+    if (
+      !dish ||
+      typeof dish !== 'object' ||
+      typeof dish.id !== 'string' ||
+      typeof dish.name !== 'string' ||
+      !dish.id ||
+      !dish.name
+    ) {
+      throw new Error('meals.json contains an invalid dish');
+    }
+    if (seen.has(dish.id)) {
+      throw new Error(`Duplicate dish ID: ${dish.id}`);
+    }
+    seen.add(dish.id);
+  }
+  return data;
+}
 
 function loadStore() {
-  store = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  store.dishes ||= [];
-  store.schedule ||= {};
-  store.schedule.weekdays ||= {};
-  store.schedule.overrides ||= {};
-  store.schedule.weeks ||= {};
-  store.display ||= {};
+  try {
+    store = validateLoadedStore(
+      JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'))
+    );
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      throw new Error(`Cannot load ${DATA_FILE}: ${err.message}`);
+    }
+    store = validateLoadedStore({
+      dishes: [],
+      schedule: {
+        weekdays: {},
+        overrides: {},
+        weeks: {}
+      },
+      display: {}
+    });
+    saveStoreSync();
+  }
 }
 
-function saveStore() {                       // atomisk skrivning
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(store, null, 2));
-  fs.renameSync(tmp, DATA_FILE);
+/* ---------------- persistent storage ---------------- */
+
+/*
+ * Writes a complete JSON snapshot to a temporary file and renames it.
+ * Keep the data directory on a filesystem supporting atomic rename.
+ */
+function saveStoreSync() {
+  const tmp = path.join(
+    DATA_DIR,
+    `.meals-${process.pid}-${crypto.randomBytes(8).toString('hex')}.tmp`
+  );
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(store, null, 2), 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, DATA_FILE);
+  } catch (err) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
+    try { fs.unlinkSync(tmp); } catch {}
+    throw err;
+  }
 }
 
-function dishById(id) { return store.dishes.find(d => d.id === id); }
+/*
+ * Serializes mutations and persistence. This protects against concurrent
+ * asynchronous handlers in this process, but not multiple Node processes
+ * writing the same JSON file.
+ */
+function mutateStore(mutator) {
+  const operation = writeQueue.then(() => {
+    const previous = JSON.stringify(store);
+    mutator();
+    try {
+      saveStoreSync();
+    } catch (err) {
+      store = JSON.parse(previous);
+      throw err;
+    }
+  });
+  writeQueue = operation.catch(() => {});
+  return operation;
+}
+
+function dishById(id) {
+  return store.dishes.find(dish => dish.id === id);
+}
+
+/* ---------------- date and ISO week helpers ---------------- */
 
 function todayStr() {
-  const n = new Date();
-  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Stockholm',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(
+    parts.map(part => [part.type, part.value])
+  );
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
-function isoVeckodag(dateStr) {              // 1 = måndag ... 7 = söndag
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const dt = new Date(y, m - 1, d);
-  return ((dt.getDay() + 6) % 7) + 1;
+function isValidDateString(value) {
+  if (typeof value !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day;
 }
 
-function isoVeckaNyckel(dateStr) {           // "ÅÅÅÅ-Wvv" enligt ISO-8601
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  const dag = dt.getUTCDay() || 7;
-  dt.setUTCDate(dt.getUTCDate() + 4 - dag);
-  const arStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
-  const vecka = Math.ceil(((dt - arStart) / 86400000 + 1) / 7);
-  return `${dt.getUTCFullYear()}-W${String(vecka).padStart(2, '0')}`;
+function isoVeckodag(dateStr) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
+  return ((date.getUTCDay() + 6) % 7) + 1;
 }
 
-function veckorIAret(ar) {                   // 52 eller 53 enligt ISO-8601
-  const jan1 = new Date(Date.UTC(ar, 0, 1));
-  const skott = (ar % 4 === 0 && ar % 100 !== 0) || ar % 400 === 0;
-  return (jan1.getUTCDay() === 4 || (skott && jan1.getUTCDay() === 3)) ? 53 : 52;
+function isoVeckaNyckel(dateStr) {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
+  const weekday = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - weekday);
+  const isoYear = date.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  const week = Math.ceil(
+    ((date - yearStart) / 86400000 + 1) / 7
+  );
+  return `${isoYear}-W${String(week).padStart(2, '0')}`;
 }
 
-function veckonyckel(key) {                  // validera "ÅÅÅÅ-Wvv" -> { ar, vecka } | null
-  const m = /^(\d{4})-W(\d{2})$/.exec(String(key));
-  if (!m) return null;
-  const ar = +m[1], vecka = +m[2];
-  return vecka >= 1 && vecka <= veckorIAret(ar) ? { ar, vecka } : null;
+function weeksInYear(year) {
+  const jan1 = new Date(Date.UTC(year, 0, 1));
+  const leap = (year % 4 === 0 && year % 100 !== 0) ||
+    year % 400 === 0;
+  return jan1.getUTCDay() === 4 ||
+    (leap && jan1.getUTCDay() === 3) ? 53 : 52;
 }
 
-/* Den enda funktionen frontend är beroende av.
-   Uppslagning per dag: datum-undantag > veckans planering > standardveckoschema. */
+function veckonyckel(key) {
+  const match = /^(\d{4})-W(\d{2})$/.exec(String(key));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  if (year < 1 || week < 1 || week > weeksInYear(year)) {
+    return null;
+  }
+  return { ar: year, vecka: week };
+}
+
+/* ---------------- menu resolution ---------------- */
+
 function menuFor(dateStr) {
-  const wd = isoVeckodag(dateStr);
-  const veckaKey = isoVeckaNyckel(dateStr);
+  const weekday = isoVeckodag(dateStr);
+  const weekKey = isoVeckaNyckel(dateStr);
   const override = store.schedule.overrides[dateStr];
-  const veckaDag = (store.schedule.weeks[veckaKey] || {})[String(wd)];
+  const weekDay = (store.schedule.weeks[weekKey] || {})[
+    String(weekday)
+  ];
 
-  let ids, kalla;
-  if (override !== undefined) { ids = override; kalla = 'override'; }
-  else if (veckaDag !== undefined) { ids = veckaDag; kalla = 'vecka'; }
-  else { ids = store.schedule.weekdays[String(wd)] || []; kalla = 'veckodag'; }
+  let ids;
+  let source;
+  if (override !== undefined) {
+    ids = override;
+    source = 'override';
+  } else if (weekDay !== undefined) {
+    ids = weekDay;
+    source = 'vecka';
+  } else {
+    ids = store.schedule.weekdays[String(weekday)] || [];
+    source = 'veckodag';
+  }
 
-  const dishes = ids.map(id => {
-    const dish = dishById(id);
-    if (!dish) console.warn(`[meny] okänt rätt-id "${id}" på ${dateStr}`);
-    return dish;
-  }).filter(Boolean).slice(0, MAX_MEALS_PER_DAY);
+  if (!Array.isArray(ids)) ids = [];
+  const dishes = [...new Set(ids)]
+    .map(id => {
+      const dish = dishById(id);
+      if (!dish) {
+        console.warn(`[meny] Unknown dish ID "${id}" on ${dateStr}`);
+      }
+      return dish;
+    })
+    .filter(Boolean)
+    .slice(0, MAX_MEALS_PER_DAY);
 
   return {
     date: dateStr,
-    weekday: wd,
-    weekdayName: VECKODAGAR[wd],
-    week: veckaKey,
-    source: kalla,
+    weekday,
+    weekdayName: VECKODAGAR[weekday],
+    week: weekKey,
+    source,
     dishes,
     display: store.display,
-    updatedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
   };
 }
 
-function normalizeDish(body) {
-  if (!body || !body.id || !body.name) return null;
+/* ---------------- input validation ---------------- */
+
+function normalizeId(value) {
+  if (typeof value !== 'string') return '';
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MAX_ID_LENGTH);
+}
+
+function stringField(value, field, maxLength = MAX_TEXT_LENGTH) {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw httpError(400, `${field} must be a string of at most ${maxLength} characters`);
+  }
+  return value.trim();
+}
+
+function normalizeDish(body, forcedId) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw httpError(400, 'Request body must be an object');
+  }
+  const rawId = forcedId !== undefined ? forcedId : body.id;
+  const id = normalizeId(rawId);
+  if (!id) throw httpError(400, 'id is required');
+  if (typeof body.name !== 'string' || !body.name.trim()) {
+    throw httpError(400, 'name is required');
+  }
+  if (body.name.trim().length > MAX_NAME_LENGTH) {
+    throw httpError(400, 'name is too long');
+  }
+  if (body.allergens !== undefined && !Array.isArray(body.allergens)) {
+    throw httpError(400, 'allergens must be an array');
+  }
+  if (body.tags !== undefined && !Array.isArray(body.tags)) {
+    throw httpError(400, 'tags must be an array');
+  }
+  const allergens = body.allergens || [];
+  const tags = body.tags || [];
+  if (allergens.length > MAX_ALLERGENS || tags.length > MAX_TAGS) {
+    throw httpError(400, 'Too many allergens or tags');
+  }
+  if (!allergens.every(
+    item => typeof item === 'string' && ALLOWED_ALLERGENS.has(item)
+  )) {
+    throw httpError(400, 'allergens contains an unknown value');
+  }
+  if (!tags.every(
+    item => typeof item === 'string' && item.length <= 100
+  )) {
+    throw httpError(400, 'tags contains an invalid value');
+  }
+  let price = body.price ?? null;
+  if (price !== null) {
+    if (
+      typeof price !== 'number' ||
+      !Number.isFinite(price) ||
+      price < 0 ||
+      price > 100000
+    ) {
+      throw httpError(400, 'price must be a valid non-negative number or null');
+    }
+  }
+  const image = stringField(body.image, 'image', 255);
+  if (image && (
+    image.includes('/') ||
+    image.includes('\\') ||
+    image === '.' ||
+    image === '..'
+  )) {
+    throw httpError(400, 'image must be a filename, not a path');
+  }
   return {
-    id: String(body.id).toLowerCase().replace(/[^a-z0-9-]+/g, '-'),
-    name: String(body.name),
-    description: String(body.description || ''),
-    ingredients: String(body.ingredients || ''),
-    allergens: Array.isArray(body.allergens) ? body.allergens.map(String) : [],
-    tags: Array.isArray(body.tags) ? body.tags.map(String) : [],
-    price: body.price ?? null,
-    image: String(body.image || ''),
-    origin: String(body.origin || ''),
+    id,
+    name: body.name.trim(),
+    description: stringField(body.description, 'description'),
+    ingredients: stringField(body.ingredients, 'ingredients'),
+    allergens: [...new Set(allergens)],
+    tags: [...new Set(tags.map(tag => tag.trim()))],
+    price,
+    image,
+    origin: stringField(body.origin, 'origin', 500)
   };
 }
 
-/* ---------------- autentisering (admin) ---------------- */
+function validatedDishIds(body) {
+  if (
+    !body ||
+    typeof body !== 'object' ||
+    Array.isArray(body) ||
+    !Array.isArray(body.dishIds)
+  ) {
+    throw httpError(400, 'dishIds must be an array');
+  }
+  if (body.dishIds.length > MAX_MEALS_PER_DAY) {
+    throw httpError(400, `Maximum ${MAX_MEALS_PER_DAY} dishes per day`);
+  }
+  if (!body.dishIds.every(
+    id => typeof id === 'string' && id.trim()
+  )) {
+    throw httpError(400, 'dishIds contains an invalid value');
+  }
+  const ids = body.dishIds.map(id => id.trim());
+  if (new Set(ids).size !== ids.length) {
+    throw httpError(400, 'Duplicate dish IDs are not allowed');
+  }
+  const unknown = ids.filter(id => !dishById(id));
+  if (unknown.length) {
+    throw httpError(400, `Unknown dish IDs: ${unknown.join(', ')}`);
+  }
+  return ids;
+}
+
+function validateDisplay(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw httpError(400, 'Display settings must be an object');
+  }
+  if (Object.keys(body).length > 50) {
+    throw httpError(400, 'Too many display settings');
+  }
+  for (const [key, value] of Object.entries(body)) {
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(key)) {
+      throw httpError(400, `Invalid display setting key: ${key}`);
+    }
+    if (
+      !['string', 'number', 'boolean'].includes(typeof value) ||
+      (typeof value === 'string' && value.length > 1000) ||
+      (typeof value === 'number' && !Number.isFinite(value))
+    ) {
+      throw httpError(400, `Invalid display setting: ${key}`);
+    }
+  }
+  return body;
+}
+
+/* ---------------- authentication ---------------- */
 
 function isAdmin(req) {
-  const a = Buffer.from(String(req.headers['x-admin-token'] || ''));
-  const b = Buffer.from(ADMIN_TOKEN);
+  const supplied = req.get('x-admin-token');
+  if (typeof supplied !== 'string') return false;
+  const a = Buffer.from(supplied, 'utf8');
+  const b = Buffer.from(ADMIN_TOKEN, 'utf8');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-/* ---------------- app ---------------- */
+function requireAdmin(req, res, next) {
+  if (!isAdmin(req)) {
+    return res.status(401).json({
+      error: 'Missing or invalid x-admin-token'
+    });
+  }
+  next();
+}
+
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+/* ---------------- Express configuration ---------------- */
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+const mat = express.Router();
+
+app.disable('x-powered-by');
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      // UI uses inline scripts/styles; kiosk runs over plain HTTP on the LAN
+      'script-src': ["'self'", "'unsafe-inline'"],
+      'upgrade-insecure-requests': null
+    }
+  }
+}));
+
+/*
+ * Image requests get their own JSON parser and limit.
+ * All other JSON requests are limited to 256 KiB.
+ */
+app.use(express.json({
+  limit: '256kb',
+  type: req => !/\/api\/images\/[^/]+$/.test(req.path)
+}));
+
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 300,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many requests; try again later' }
+});
+const imageLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many image uploads; try again later' }
+});
+
+mat.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+mat.use('/api', (req, res, next) => {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return adminLimiter(req, res, next);
+  }
+  next();
+});
 
 function page(name) {
-  return (req, res) => {
-    // always validate HTML in the browser: prevents stale scripts in kiosk mode
+  return (req, res, next) => {
     res.set('Cache-Control', 'no-cache');
-    res.type('html').sendFile(path.join(PUBLIC_DIR, name));
+    res.sendFile(path.join(PUBLIC_DIR, name), err => {
+      if (err) next(err);
+    });
   };
 }
-/* Allt monteras under BASE_PATH: visning, admin, api och bilder */
-const mat = express.Router();
+
 mat.get('/', page('display.html'));
 mat.get('/display', page('display.html'));
 mat.get('/admin', page('admin.html'));
-mat.use('/images', express.static(IMAGES_DIR, { maxAge: '1h' }));
+mat.use('/images', express.static(IMAGES_DIR, {
+  maxAge: '1h',
+  fallthrough: true,
+  index: false,
+  dotfiles: 'deny',
+  setHeaders(res) {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  }
+}));
 
 app.use(BASE_PATH || '/', mat);
 
-/* påminn gamla sökvägar vidare när en bas-sökväg är satt */
 if (BASE_PATH) {
-  app.get('/', (req, res) => res.redirect(BASE_PATH));
-  app.get('/admin', (req, res) => res.redirect(BASE_PATH + '/admin'));
+  app.get('/', (req, res) => res.redirect(302, `${BASE_PATH}/`));
+  app.get('/admin', (req, res) => res.redirect(302, `${BASE_PATH}/admin`));
 }
 
-/* --- publikt API (frontend använder bara dessa) --- */
+function publicImageUrl(name) {
+  return `${BASE_PATH}/images/${encodeURIComponent(name)}`;
+}
 
-mat.get('/api/menu/today', (req, res) => res.json(menuFor(todayStr())));
+/* ---------------- public menu API ---------------- */
+
+mat.get('/api/menu/today', (req, res) => {
+  res.json(menuFor(todayStr()));
+});
+
 mat.get('/api/menu/:date', (req, res) => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date))
-    return res.status(400).json({ error: 'datum måste vara ÅÅÅÅ-MM-DD' });
+  if (!isValidDateString(req.params.date)) {
+    return res.status(400).json({
+      error: 'date must be a valid YYYY-MM-DD calendar date'
+    });
+  }
   res.json(menuFor(req.params.date));
 });
-mat.get('/api/allergen-labels', (req, res) => res.json(ALLERGEN_ETIKETTER));
 
-/* --- rätter --- */
+mat.get('/api/allergen-labels', (req, res) => {
+  res.json(ALLERGEN_ETIKETTER);
+});
 
-mat.get('/api/dishes', (req, res) => res.json(store.dishes));
+/* ---------------- dishes (admin) ---------------- */
 
-mat.post('/api/dishes', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
+mat.get('/api/dishes', requireAdmin, (req, res) => {
+  res.json(store.dishes);
+});
+
+mat.post('/api/dishes', requireAdmin, async (req, res) => {
   const dish = normalizeDish(req.body);
-  if (!dish) return res.status(400).json({ error: 'id och name är obligatoriska' });
-  if (dishById(dish.id)) return res.status(409).json({ error: `rätten ${dish.id} finns redan – använd PUT` });
-  store.dishes.push(dish);
-  saveStore();
+  if (dishById(dish.id)) {
+    throw httpError(409, `Dish ${dish.id} already exists; use PUT`);
+  }
+  await mutateStore(() => {
+    if (dishById(dish.id)) {
+      throw httpError(409, `Dish ${dish.id} already exists; use PUT`);
+    }
+    store.dishes.push(dish);
+  });
   res.status(201).json(dish);
 });
 
-mat.put('/api/dishes/:id', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  const dish = normalizeDish({ ...req.body, id: req.params.id });
-  if (!dish) return res.status(400).json({ error: 'name är obligatoriskt' });
-  const i = store.dishes.findIndex(d => d.id === dish.id);
-  if (i === -1) return res.status(404).json({ error: 'okänt rätt-id' });
-  store.dishes[i] = dish;
-  saveStore();
+mat.put('/api/dishes/:id', requireAdmin, async (req, res) => {
+  const id = normalizeId(req.params.id);
+  const dish = normalizeDish(req.body, req.params.id);
+  if (dish.id !== id) {
+    throw httpError(400, 'Invalid dish ID');
+  }
+  await mutateStore(() => {
+    const index = store.dishes.findIndex(item => item.id === id);
+    if (index === -1) throw httpError(404, 'Unknown dish ID');
+    store.dishes[index] = dish;
+  });
   res.json(dish);
 });
 
-mat.delete('/api/dishes/:id', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  const before = store.dishes.length;
-  store.dishes = store.dishes.filter(d => d.id !== req.params.id);
-  if (store.dishes.length === before) return res.status(404).json({ error: 'okänt rätt-id' });
-  saveStore();
-  res.json({ deleted: req.params.id });
+mat.delete('/api/dishes/:id', requireAdmin, async (req, res) => {
+  const id = normalizeId(req.params.id);
+  await mutateStore(() => {
+    if (!dishById(id)) throw httpError(404, 'Unknown dish ID');
+    const references = [];
+    for (const [date, ids] of Object.entries(store.schedule.overrides)) {
+      if (Array.isArray(ids) && ids.includes(id)) references.push(date);
+    }
+    for (const [weekday, ids] of Object.entries(store.schedule.weekdays)) {
+      if (Array.isArray(ids) && ids.includes(id)) {
+        references.push(`weekday:${weekday}`);
+      }
+    }
+    for (const [week, days] of Object.entries(store.schedule.weeks)) {
+      for (const [weekday, ids] of Object.entries(days || {})) {
+        if (Array.isArray(ids) && ids.includes(id)) {
+          references.push(`${week}:${weekday}`);
+        }
+      }
+    }
+    if (references.length) {
+      throw httpError(
+        409,
+        `Dish is still referenced by the schedule: ${references.slice(0, 10).join(', ')}`
+      );
+    }
+    store.dishes = store.dishes.filter(item => item.id !== id);
+  });
+  res.json({ deleted: id });
 });
 
-/* --- schema (veckodagar + datum-undantag) --- */
+/* ---------------- schedule helpers ---------------- */
 
-mat.get('/api/schedule', (req, res) => res.json(store.schedule));
-
-mat.put('/api/schedule/weekday/:wd', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  const wd = req.params.wd;
-  if (!/^[1-7]$/.test(wd)) return res.status(400).json({ error: 'wd måste vara 1..7 (1 = måndag)' });
-  const ids = (req.body?.dishIds || []).map(String).filter(Boolean).slice(0, MAX_MEALS_PER_DAY);
-  const unknown = ids.filter(id => !dishById(id));
-  if (unknown.length) return res.status(400).json({ error: `okända rätt-id:n: ${unknown.join(', ')}` });
-  store.schedule.weekdays[wd] = ids;
-  saveStore();
-  res.json({ veckodag: VECKODAGAR[+wd], dishIds: ids });
-});
-
-/* --- per-vecka-planering: nyckel "ÅÅÅÅ-Wvv" (ISO-vecka) --- */
-
-mat.put('/api/schedule/week/:key/:wd', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  if (!veckonyckel(req.params.key)) return res.status(400).json({ error: 'ogiltig veckonyckel (format ÅÅÅÅ-Wvv)' });
-  const wd = req.params.wd;
-  if (!/^[1-7]$/.test(wd)) return res.status(400).json({ error: 'wd måste vara 1..7 (1 = måndag)' });
-  const ids = (req.body?.dishIds || []).map(String).filter(Boolean).slice(0, MAX_MEALS_PER_DAY);
-  const unknown = ids.filter(id => !dishById(id));
-  if (unknown.length) return res.status(400).json({ error: `okända rätt-id:n: ${unknown.join(', ')}` });
-  store.schedule.weeks[req.params.key] ||= {};
-  store.schedule.weeks[req.params.key][wd] = ids;
-  saveStore();
-  res.json({ vecka: req.params.key, veckodag: VECKODAGAR[+wd], dishIds: ids });
-});
-
-mat.put('/api/schedule/week/:key', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  if (!veckonyckel(req.params.key)) return res.status(400).json({ error: 'ogiltig veckonyckel (format ÅÅÅÅ-Wvv)' });
-  const städa = {};
-  for (const [wd, ids] of Object.entries(req.body?.days || {})) {
-    if (!/^[1-7]$/.test(wd)) return res.status(400).json({ error: `ogiltig veckodag: ${wd}` });
-    städa[wd] = (ids || []).map(String).filter(Boolean).slice(0, MAX_MEALS_PER_DAY);
-    const unknown = städa[wd].filter(id => !dishById(id));
-    if (unknown.length) return res.status(400).json({ error: `okända rätt-id:n: ${unknown.join(', ')}` });
+function validWeekday(value) {
+  if (!/^[1-7]$/.test(value)) {
+    throw httpError(400, 'wd must be 1..7 (1 = Monday)');
   }
-  store.schedule.weeks[req.params.key] = städa;
-  saveStore();
-  res.json({ vecka: req.params.key, days: städa });
+  return value;
+}
+
+function validWeekKey(value) {
+  if (!veckonyckel(value)) {
+    throw httpError(400, 'Invalid ISO week key (YYYY-Www)');
+  }
+  return value;
+}
+
+function validRouteDate(value) {
+  if (!isValidDateString(value)) {
+    throw httpError(400, 'Invalid calendar date (YYYY-MM-DD)');
+  }
+  return value;
+}
+
+function requireScheduleAdmin(req, res, next) {
+  return requireAdmin(req, res, next);
+}
+
+mat.get('/api/schedule', requireScheduleAdmin, (req, res) => {
+  res.json(store.schedule);
 });
 
-mat.delete('/api/schedule/week/:key', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  delete store.schedule.weeks[req.params.key];
-  saveStore();
-  res.json({ cleared: req.params.key });
+mat.put('/api/schedule/weekday/:wd', requireAdmin, async (req, res) => {
+  const wd = validWeekday(req.params.wd);
+  const ids = validatedDishIds(req.body);
+  await mutateStore(() => {
+    store.schedule.weekdays[wd] = ids;
+  });
+  res.json({ veckodag: VECKODAGAR[Number(wd)], dishIds: ids });
 });
 
-mat.put('/api/schedule/override/:date', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(req.params.date)) return res.status(400).json({ error: 'ogiltigt datum' });
-  const ids = (req.body?.dishIds || []).map(String).filter(Boolean).slice(0, MAX_MEALS_PER_DAY);
-  const unknown = ids.filter(id => !dishById(id));
-  if (unknown.length) return res.status(400).json({ error: `okända rätt-id:n: ${unknown.join(', ')}` });
-  store.schedule.overrides[req.params.date] = ids;   // [] = "köket stängt"
-  saveStore();
-  res.json({ date: req.params.date, dishIds: ids });
+mat.put('/api/schedule/week/:key/:wd', requireAdmin, async (req, res) => {
+  const key = validWeekKey(req.params.key);
+  const wd = validWeekday(req.params.wd);
+  const ids = validatedDishIds(req.body);
+  await mutateStore(() => {
+    store.schedule.weeks[key] ??= {};
+    store.schedule.weeks[key][wd] = ids;
+  });
+  res.json({
+    vecka: key,
+    veckodag: VECKODAGAR[Number(wd)],
+    dishIds: ids
+  });
 });
 
-mat.delete('/api/schedule/override/:date', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  delete store.schedule.overrides[req.params.date];
-  saveStore();
-  res.json({ cleared: req.params.date });
+mat.put('/api/schedule/week/:key', requireAdmin, async (req, res) => {
+  const key = validWeekKey(req.params.key);
+  if (!req.body || typeof req.body !== 'object' ||
+      Array.isArray(req.body) ||
+      !req.body.days ||
+      typeof req.body.days !== 'object' ||
+      Array.isArray(req.body.days)) {
+    throw httpError(400, 'days must be an object');
+  }
+  if (Object.keys(req.body.days).length > 7) {
+    throw httpError(400, 'At most seven weekdays are allowed');
+  }
+  const days = {};
+  for (const [wd, value] of Object.entries(req.body.days)) {
+    validWeekday(wd);
+    days[wd] = validatedDishIds({ dishIds: value });
+  }
+  await mutateStore(() => {
+    store.schedule.weeks[key] = days;
+  });
+  res.json({ vecka: key, days });
 });
 
-/* --- visningsinställningar --- */
+mat.delete('/api/schedule/week/:key', requireAdmin, async (req, res) => {
+  const key = validWeekKey(req.params.key);
+  await mutateStore(() => {
+    delete store.schedule.weeks[key];
+  });
+  res.json({ cleared: key });
+});
 
-mat.put('/api/display', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  store.display = { ...store.display, ...req.body };
-  saveStore();
+mat.put('/api/schedule/override/:date', requireAdmin, async (req, res) => {
+  const date = validRouteDate(req.params.date);
+  const ids = validatedDishIds(req.body);
+  await mutateStore(() => {
+    store.schedule.overrides[date] = ids;
+  });
+  res.json({ date, dishIds: ids });
+});
+
+mat.delete('/api/schedule/override/:date', requireAdmin, async (req, res) => {
+  const date = validRouteDate(req.params.date);
+  await mutateStore(() => {
+    delete store.schedule.overrides[date];
+  });
+  res.json({ cleared: date });
+});
+
+/* ---------------- display settings ---------------- */
+
+mat.put('/api/display', requireAdmin, async (req, res) => {
+  const settings = validateDisplay(req.body);
+  await mutateStore(() => {
+    store.display = { ...store.display, ...settings };
+  });
   res.json(store.display);
 });
 
-/* --- valfri bilduppladdning (base64 i JSON) --- */
+/* ---------------- image uploads ---------------- */
 
-mat.post('/api/images/:name', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Saknar eller fel x-admin-token' });
-  const name = req.params.name;
-  if (!/^[a-z0-9._-]+\.(jpe?g|png|webp)$/i.test(name)) return res.status(400).json({ error: 'ogiltigt filnamn' });
-  const buf = Buffer.from(String(req.body?.base64 || ''), 'base64');
-  if (!buf.length || buf.length > 4_000_000) return res.status(400).json({ error: 'tom eller för stor (>4 MB)' });
-  fs.writeFileSync(path.join(IMAGES_DIR, name), buf);
-  res.json({ file: `/images/${name}` });
-});
+/*
+ * Accepts JSON:
+ *   { "base64": "..." }
+ *
+ * The filename extension is checked against the actual decoded format.
+ * The image is decoded and re-encoded, stripping embedded metadata.
+ */
+mat.post(
+  '/api/images/:name',
+  requireAdmin,
+  imageLimiter,
+  express.json({ limit: '6mb' }),
+  async (req, res) => {
+    const requestedName = req.params.name;
+    if (!/^[a-zA-Z0-9_-]{1,100}\.(jpe?g|png|webp)$/i.test(requestedName)) {
+      throw httpError(400, 'Invalid image filename');
+    }
+    if (!req.body || typeof req.body.base64 !== 'string') {
+      throw httpError(400, 'base64 must be a string');
+    }
 
-/* --- tokenkontroll för inloggning i admin-UI --- */
+    const encoded = req.body.base64;
+    if (
+      encoded.length === 0 ||
+      encoded.length > Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 16 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
+    ) {
+      throw httpError(400, 'Invalid or oversized base64 image');
+    }
 
-mat.post('/api/admin/verify', (req, res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Fel token' });
+    const buffer = Buffer.from(encoded, 'base64');
+    if (!buffer.length || buffer.length > MAX_IMAGE_BYTES) {
+      throw httpError(400, 'Image must be between 1 byte and 4 MB');
+    }
+
+    const extension = path.extname(requestedName).slice(1).toLowerCase();
+    const expectedFormat = extension === 'jpg' || extension === 'jpeg'
+      ? 'jpeg'
+      : extension;
+
+    let image;
+    let metadata;
+    try {
+      image = sharp(buffer, {
+        limitInputPixels: MAX_IMAGE_PIXELS,
+        animated: false
+      });
+      metadata = await image.metadata();
+    } catch {
+      throw httpError(400, 'Invalid or unsupported image');
+    }
+
+    if (
+      !metadata.width ||
+      !metadata.height ||
+      metadata.width > MAX_IMAGE_DIMENSION ||
+      metadata.height > MAX_IMAGE_DIMENSION ||
+      metadata.width * metadata.height > MAX_IMAGE_PIXELS ||
+      metadata.format !== expectedFormat
+    ) {
+      throw httpError(400, 'Image format or dimensions are not allowed');
+    }
+
+    let output;
+    try {
+      const pipeline = sharp(buffer, {
+        limitInputPixels: MAX_IMAGE_PIXELS,
+        animated: false
+      }).rotate();
+      if (expectedFormat === 'jpeg') {
+        output = await pipeline.jpeg({ quality: 85 }).toBuffer();
+      } else if (expectedFormat === 'png') {
+        output = await pipeline.png().toBuffer();
+      } else {
+        output = await pipeline.webp({ quality: 85 }).toBuffer();
+      }
+    } catch {
+      throw httpError(400, 'Image could not be decoded');
+    }
+
+    const finalName = requestedName.toLowerCase();
+    const destination = path.join(IMAGES_DIR, finalName);
+
+    /*
+     * wx prevents silently overwriting an existing file.
+     * The normalized filename is restricted to a safe character set.
+     */
+    const tmp = path.join(
+      IMAGES_DIR,
+      `.upload-${crypto.randomBytes(12).toString('hex')}.tmp`
+    );
+    try {
+      fs.writeFileSync(tmp, output, { flag: 'wx', mode: 0o640 });
+      if (fs.existsSync(destination)) {
+        throw httpError(409, 'Image already exists');
+      }
+      fs.renameSync(tmp, destination);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch {}
+      if (err.status) throw err;
+      throw err;
+    }
+
+    res.status(201).json({
+      file: publicImageUrl(finalName)
+    });
+  }
+);
+
+/* ---------------- admin token verification ---------------- */
+
+mat.post('/api/admin/verify', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-/* ---------------- starta ---------------- */
+/* ---------------- 404 and error handling ---------------- */
 
-loadStore();
-app.listen(PORT, () => {
-  console.log(`Matsal-menyn körs på http://localhost:${PORT}`);
-  const bas = BASE_PATH || '';
-  console.log(`  visning: http://localhost:${PORT}${bas}/   admin: http://localhost:${PORT}${bas}/admin`);
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
 });
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = Number.isInteger(err.status) &&
+    err.status >= 400 && err.status <= 599
+    ? err.status
+    : 500;
+  if (status >= 500) {
+    console.error('[meny] Request failed:', err.message);
+  }
+  res.status(status).json({
+    error: status === 500
+      ? 'Internal server error'
+      : status === 413
+        ? 'Request body too large'
+        : err.message
+  });
+});
+
+/* ---------------- start ---------------- */
+
+ensureDirectories();
+loadStore();
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Matsal-menyn listening on port ${PORT}`);
+  console.log(`Display: http://localhost:${PORT}${BASE_PATH}/`);
+  console.log(`Admin:   http://localhost:${PORT}${BASE_PATH}/admin`);
+});
+
+function shutdown(signal) {
+  console.log(`[meny] ${signal}: shutting down`);
+  server.close(err => {
+    if (err) {
+      console.error('[meny] Shutdown failed:', err.message);
+      process.exitCode = 1;
+    }
+    process.exit();
+  });
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

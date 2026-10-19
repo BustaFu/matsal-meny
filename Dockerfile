@@ -1,18 +1,23 @@
 # syntax=docker/dockerfile:1
 
+# Debian-slim (inte alpine): sharp:s färdiga binärer (glibc) fungerar direkt,
+# ingen källkodsbyggnad av libvips behövs. Byggstadiet använder samma lockfil
+# som värden, som innehåller glibc-varianten av sharp.
+
 # ---------- Byggsteg: installera beroenden ----------
-FROM node:22-alpine AS build
+FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
 # ---------- Körsteg ----------
-FROM node:22-alpine
+FROM node:22-slim
 ENV NODE_ENV=production
 WORKDIR /app
 
 # kör som icke-root-användare
-RUN addgroup -S matsal && adduser -S matsal -G matsal
+RUN groupadd --system matsal && \
+    useradd --system --gid matsal --no-create-home matsal
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --chown=matsal:matsal src ./src
@@ -26,7 +31,8 @@ RUN chown -R matsal:matsal /app/data /app/images
 USER matsal
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:${PORT:-3000}${BASE_PATH-/meny}/api/menu/today >/dev/null || exit 1
+# hälsokoll med node (slim saknar wget) – följer PORT och BASE_PATH
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+process.env.BASE_PATH+'/api/menu/today').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "src/server.js"]
